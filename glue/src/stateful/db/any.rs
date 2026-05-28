@@ -13,7 +13,6 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     index::{
         unordered::Index as UnorderedIdx, Ordered as OrderedIndex, Unordered as UnorderedIndex,
@@ -36,7 +35,7 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-    Persistable,
+    Context as StorageContext, Persistable,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -52,7 +51,7 @@ type AnyDbHandle<F, E, C, I, H, U, S> =
 pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -69,7 +68,7 @@ where
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>
@@ -112,7 +111,7 @@ where
 pub struct AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -127,7 +126,7 @@ where
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -145,7 +144,7 @@ where
 impl<F, E, C, I, H, U, S> Deref for AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -164,7 +163,7 @@ where
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>
@@ -206,7 +205,7 @@ where
 impl<F, E, C, I, H, U, S> AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -234,7 +233,7 @@ impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
     for AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>
@@ -262,7 +261,7 @@ impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
     for AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>
@@ -289,7 +288,7 @@ where
 impl<F, E, C, I, H, U, S> MerkleizedTrait for AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Mutable<Item = Operation<F, U>> + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -335,7 +334,7 @@ impl<F, E, K, V, H, T, S> ManagedDb<E>
     >
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -424,7 +423,7 @@ impl<F, E, K, V, H, T, S> ManagedDb<E>
     >
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -517,7 +516,7 @@ impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
     >
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -571,7 +570,7 @@ impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
     >
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,

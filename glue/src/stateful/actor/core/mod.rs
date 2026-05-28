@@ -25,7 +25,8 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_storage::Context as StorageContext;
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
@@ -42,7 +43,7 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -84,7 +85,7 @@ where
 /// application and verifying traits.
 pub struct Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -119,7 +120,7 @@ where
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
