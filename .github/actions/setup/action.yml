@@ -114,3 +114,21 @@ runs:
         cache-workspace-crates: false
         workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+    - name: Setup sccache
+      if: inputs.rust-cache-enabled == 'true'
+      uses: andresilva/sccache-action@38d0e0dfce4e464b8de3e000ef93808aaac6bdf9 # v0.0.10-commonware.1
+      with:
+        repository: andresilva/sccache
+        version: v0.15.0-commonware.1
+    - name: Configure sccache
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      run: |
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          echo "SCCACHE_GHA_RW_MODE=READ_WRITE" >> "$GITHUB_ENV"
+        else
+          echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+        fi
