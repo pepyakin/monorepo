@@ -127,12 +127,8 @@ runs:
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-        # Temporarily allow PR cache writes while validating the sccache fork.
-        # Restore this after the experiment so only main writes native sccache objects:
-        #
-        # if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-        #   echo "SCCACHE_GHA_RW_MODE=READ_WRITE" >> "$GITHUB_ENV"
-        # else
-        #   echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
-        # fi
-        echo "SCCACHE_GHA_RW_MODE=READ_WRITE" >> "$GITHUB_ENV"
+        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          echo "SCCACHE_GHA_RW_MODE=READ_WRITE" >> "$GITHUB_ENV"
+        else
+          echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+        fi
