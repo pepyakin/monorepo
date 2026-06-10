@@ -597,18 +597,24 @@ pub mod tests {
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<F: merkle::Graftable, C: DbAny<F>>(
-        db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)>,
-    ) -> Result<(), Error<F>> {
-        let mut batch = db.new_batch();
-        for (k, v) in writes {
-            batch = batch.write(k, v);
-        }
-        let merkleized = batch.merkleize(db, None).await?;
-        db.apply_batch(merkleized).await?;
-        db.commit().await?;
-        Ok(())
+    ///
+    /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
+    /// (and poll frames) of every test composing commits, which overflow the stack on platforms
+    /// with small defaults.
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<F>>(
+        db: &'a mut C,
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)> + 'a,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Error<F>>> + 'a>> {
+        Box::pin(async move {
+            let mut batch = db.new_batch();
+            for (k, v) in writes {
+                batch = batch.write(k, v);
+            }
+            let merkleized = batch.merkleize(db, None).await?;
+            db.apply_batch(merkleized).await?;
+            db.commit().await?;
+            Ok(())
+        })
     }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
@@ -704,7 +710,8 @@ pub mod tests {
         let state1 = {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+            let mut db: C =
+                Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -715,7 +722,7 @@ pub mod tests {
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db: C = open_db_clone(context.child("second"), partition).await;
+            let db: C = Box::pin(open_db_clone(context.child("second"), partition)).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -729,7 +736,7 @@ pub mod tests {
         let state2 = executor.start(|mut context| async move {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db(context.child("first"), partition.clone()).await;
+            let mut db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -739,7 +746,7 @@ pub mod tests {
 
             let root = db.root();
             drop(db);
-            let db: C = open_db(context.child("second"), partition).await;
+            let db: C = Box::pin(open_db(context.child("second"), partition)).await;
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -761,7 +768,7 @@ pub mod tests {
     {
         let mut open_db_clone = open_db.clone();
         let partition = "commit-after-sync".to_string();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
         let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
         let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
         let value0 = <C as DbAny<M>>::Value::from_seed(100);
@@ -781,7 +788,7 @@ pub mod tests {
         let committed_size = db.size().await;
         drop(db);
 
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.size().await, committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
@@ -807,7 +814,7 @@ pub mod tests {
 
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
@@ -824,10 +831,10 @@ pub mod tests {
         // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
         // state of the DB should be as of the last commit.
         drop(db);
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
             partition.clone(),
-        )
+        ))
         .await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.bounds().await.end, committed_op_count);
@@ -845,17 +852,17 @@ pub mod tests {
 
         // We should be able to recover, so the root should differ from the previous commit, and
         // the op count should be greater than before.
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 2),
             partition.clone(),
-        )
+        ))
         .await;
         let scenario_2_root = db.root();
 
         // To confirm the second committed hash is correct we'll re-build the DB in a new
         // partition, but without any failures. They should have the exact same state.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
-        let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("fresh"), fresh_partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
@@ -890,9 +897,13 @@ pub mod tests {
 
         let mut open_db_clone = open_db.clone();
         // Create two databases that are identical other than how they are pruned.
-        let mut db_no_pruning: C =
-            open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
-        let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
+        let mut db_no_pruning: C = Box::pin(open_db_clone(
+            context.child("no_pruning"),
+            "no-pruning-test".into(),
+        ))
+        .await;
+        let mut db_pruning: C =
+            Box::pin(open_db(context.child("pruning"), "pruning-test".into())).await;
 
         // Apply identical operations to both databases, but only prune one.
         // Accumulate writes between commits.
@@ -964,7 +975,7 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         let partition = "sync-bitmap-pruning".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
 
         // Apply random operations with commits to advance the inactivity floor.
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
@@ -998,7 +1009,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the database.
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
 
         // The pruned bits count should match. If sync() didn't persist the bitmap pruned
         // state, this would be 0.
@@ -1033,7 +1044,7 @@ pub mod tests {
         const ELEMENTS: u64 = 1000;
 
         let mut open_db_clone = open_db.clone();
-        let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), "build-big".into())).await;
 
         let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
@@ -1082,7 +1093,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the db and verify it has exactly the same state.
-        let db: C = open_db(context.child("second"), "build-big".into()).await;
+        let db: C = Box::pin(open_db(context.child("second"), "build-big".into())).await;
         assert_eq!(root, db.root());
 
         // Confirm the db's state matches that of the separate map we computed independently.
@@ -1111,7 +1122,11 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
+        let mut db: C = Box::pin(open_db(
+            context.child("db"),
+            "stale-side-effect-free".into(),
+        ))
+        .await;
 
         let key1 = <C::Key as TestKey>::from_seed(1);
         let key2 = <C::Key as TestKey>::from_seed(2);
@@ -2672,7 +2687,7 @@ pub mod tests {
         // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
         // next partial chunk. This ensures the grafted root computation must handle the
         // newly completed chunk.
-        let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("init"), partition.clone())).await;
         let mut batch = db.new_batch();
         for i in 0..260 {
             batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
@@ -2685,7 +2700,7 @@ pub mod tests {
         db.sync().await.unwrap();
         drop(db);
 
-        let db: C = open_db(context.child("reopen"), partition).await;
+        let db: C = Box::pin(open_db(context.child("reopen"), partition)).await;
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();
