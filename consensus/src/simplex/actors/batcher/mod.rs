@@ -3,12 +3,15 @@ mod ingress;
 mod round;
 mod verifier;
 
-use crate::{simplex::config::ForwardingPolicy, types::Epoch, Relay, Reporter};
+use crate::{
+    simplex::config::ForwardingPolicy,
+    types::{Epoch, TermLength},
+    Relay, Reporter,
+};
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use core::num::NonZeroU64;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 use std::{num::NonZeroUsize, time::Duration};
@@ -27,7 +30,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub skip_timeout: Duration,
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
     pub forwarding: ForwardingPolicy,
 }
 
@@ -278,7 +281,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -451,7 +454,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -613,7 +616,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -765,7 +768,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -942,7 +945,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentLeader,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -1178,7 +1181,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -1399,7 +1402,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -1573,7 +1576,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -1791,7 +1794,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -1992,7 +1995,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2189,7 +2192,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2396,7 +2399,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2528,7 +2531,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2659,7 +2662,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2795,7 +2798,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -2922,7 +2925,7 @@ mod tests {
                 skip_timeout: Duration::from_millis(100),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(5),
+                term_length: TermLength::new(commonware_utils::NZU64!(5)),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3093,7 +3096,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3247,7 +3250,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3410,7 +3413,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3536,7 +3539,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3653,7 +3656,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -3839,7 +3842,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(batcher_context, batcher_cfg);
@@ -4075,7 +4078,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
@@ -4277,7 +4280,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: NZUsize!(128),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
