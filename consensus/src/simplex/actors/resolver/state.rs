@@ -448,7 +448,8 @@ mod tests {
     #[test]
     fn fetch_requests_only_term_anchor_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
         let mut resolver = MockResolver::default();
 
         // Encountering a certificate at view 14 should request only required anchors
@@ -483,7 +484,8 @@ mod tests {
     #[test]
     fn same_term_nullification_serves_later_views_until_pruned() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
         let mut resolver = MockResolver::default();
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
@@ -524,7 +526,8 @@ mod tests {
     #[test]
     fn nullification_below_floor_can_cover_unresolved_term_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
         let mut resolver = MockResolver::default();
 
         let finalization_v3 = build_finalization(&schemes, &verifier, View::new(3));
@@ -715,7 +718,8 @@ mod tests {
     #[test]
     fn certification_success_refills_next_term_anchor_window() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(1), TermLength::new(NZU64!(5)));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(1), TermLength::new(NZU64!(5)));
         let mut resolver = MockResolver::default();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, View::new(14));

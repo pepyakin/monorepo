@@ -22,10 +22,7 @@ use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
-use std::{
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
@@ -211,7 +208,7 @@ impl<
             }
             Certificate::Nullification(nullification) => {
                 let nullified_view = nullification.view();
-                if view < nullified_view || !nullified_view.same_term(view, self.term_length) {
+                if !nullified_view.covers(view, self.term_length) {
                     debug!(%view, received = %nullified_view, "nullification view mismatch");
                     return None;
                 }

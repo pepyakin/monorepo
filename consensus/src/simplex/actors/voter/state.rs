@@ -92,7 +92,6 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub term_length: TermLength,
-    pub term_stop_notarize_on_nullify: bool,
     pub finalization_timeout: Duration,
 }
 
@@ -110,17 +109,20 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     certification_timeout: Duration,
     timeout_retry: Duration,
     term_length: TermLength,
-    term_stop_notarize_on_nullify: bool,
     finalization_timeout: Duration,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
+    /// Monotone cursor for the oldest entered, unfinalized view (the anchor of
+    /// the finalization timeout). See [`Self::next_finalization_timeout`].
+    finalization_anchor: View,
+
     /// Views for which we have voted to nullify.
     ///
-    /// Used to enforce the term safety rules that suppress later same-term
-    /// finalize votes, and optionally later same-term notarize votes.
+    /// Used to enforce the term safety rule that suppresses later same-term
+    /// finalize votes until a covering finalization is observed.
     nullify_views: BTreeSet<View>,
 
     /// Views for which we have nullification certificates. Used to answer term-level
@@ -161,12 +163,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
             term_length: cfg.term_length,
-            term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
             finalization_timeout: cfg.finalization_timeout,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            finalization_anchor: GENESIS_VIEW,
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
@@ -322,13 +324,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(round_timeout)
     }
 
-    fn next_finalization_timeout(&self) -> Option<(SystemTime, TimeoutReason)> {
+    fn next_finalization_timeout(&mut self) -> Option<(SystemTime, TimeoutReason)> {
         let term_start = self.view.term_start(self.term_length);
         let unfinalized_view = self.last_finalized.next().max(term_start);
-        self.views
-            .get(&unfinalized_view)
-            .and_then(|round| round.finalization_deadline())
-            .map(|deadline| (deadline, TimeoutReason::FinalizationTimeout))
+        // The oldest unfinalized view may never have been entered (e.g., we
+        // jumped past it by certifying a future notarization), in which case
+        // it has no deadline. Anchor on the oldest entered, unfinalized view
+        // in the current term instead.
+        //
+        // Views are entered in order, so a round at or below the current view
+        // without a deadline can never acquire one: `finalization_anchor`
+        // advances monotonically past such rounds (and the scan always
+        // terminates by the current view's round, which was entered), keeping
+        // this amortized constant time.
+        let start = self.finalization_anchor.max(unfinalized_view);
+        let (anchor, deadline) = self
+            .views
+            .range(start..=self.view)
+            .find_map(|(view, round)| round.finalization_deadline().map(|d| (*view, d)))?;
+        self.finalization_anchor = anchor;
+        Some((deadline, TimeoutReason::FinalizationTimeout))
     }
 
     /// Constructs a nullify vote for the current view, if eligible.
@@ -490,13 +505,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.
-    ///
-    /// When `term_stop_notarize_on_nullify` is enabled, a prior local nullify in
-    /// the same term suppresses later same-term notarize votes.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
-        if self.term_stop_notarize_on_nullify && self.has_prior_local_nullify_in_term(view) {
-            return None;
-        }
         let candidate = self
             .views
             .get_mut(&view)
@@ -509,15 +518,24 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Construct a finalize vote if the round provides a candidate and it is safe to do so.
     ///
-    /// The term safety rule applies: do not vote to finalize a later view in a
-    /// term if we already voted to nullify an earlier view in that same term.
+    /// The term safety rule applies: a prior same-term nullify vote blocks the
+    /// finalize vote unless an observed finalization covers it (see
+    /// [Same-Term Vote Safety](crate::simplex#same-term-vote-safety)).
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // We don't need to finalize views that are already finalized.
         if view <= self.last_finalized {
             return None;
         }
 
-        if self.has_prior_local_nullify_in_term(view) {
+        // Blocked by a same-term nullify vote unless an observed finalization
+        // covers it (proving that nullification can never form). The plain
+        // comparison suffices for coverage: the nullify vote is at or above
+        // term_start(view) and last_finalized < view, so a finalization at or
+        // above the nullify vote necessarily lies in the same term.
+        if self
+            .highest_local_nullify_in_term(view)
+            .is_some_and(|nullified| nullified > self.last_finalized)
+        {
             return None;
         }
 
@@ -608,27 +626,21 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .map(|round| round.elapsed_since_start(now))
     }
 
-    /// Immediately expires `view` on first timeout, forcing deadlines to trigger on the next tick.
+    /// Immediately expires `view` on first timeout, forcing a timeout to fire on the next tick.
     ///
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
     ///
-    /// This only records the first timeout reason for the view. Metrics are emitted
-    /// when the first timeout nullify vote is constructed.
+    /// This only latches the first timeout for the view (see
+    /// [`Round::latch_timeout`]). Metrics are emitted when the first timeout
+    /// nullify vote is constructed.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
             return;
         }
 
         let now = self.context.current();
-        let round = self.create_round(view);
-        if round.is_retrying_nullify() {
-            return;
-        }
-        let (_, is_first_timeout) = round.set_timeout_reason(reason);
-        if is_first_timeout {
-            round.set_deadlines(now, now, now);
-        }
+        self.create_round(view).latch_timeout(now, reason);
     }
 
     /// Attempt to propose a new block.
@@ -827,13 +839,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .is_some()
     }
 
-    /// Returns whether we have already locally nullified an earlier view in `view`'s term.
-    fn has_prior_local_nullify_in_term(&self, view: View) -> bool {
+    /// Returns the highest view below `view` in `view`'s term that we voted to nullify.
+    fn highest_local_nullify_in_term(&self, view: View) -> Option<View> {
         let term_start = view.term_start(self.term_length);
         self.nullify_views
             .range(term_start..view)
             .next_back()
-            .is_some()
+            .copied()
     }
 
     /// Returns the first non-nullified view in the open interval (after, before).
@@ -1024,7 +1036,6 @@ mod tests {
                 term_length: TermLength::new(
                     std::num::NonZeroU64::new(term_length).expect("term length must be non-zero"),
                 ),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             },
         );
@@ -1052,7 +1063,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -1134,7 +1144,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1213,7 +1222,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1272,7 +1280,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1317,7 +1324,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1383,7 +1389,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1478,7 +1483,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1530,7 +1534,6 @@ mod tests {
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1595,7 +1598,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1603,6 +1605,11 @@ mod tests {
 
             let view_1 = state.current_view();
             let oldest_deadline = context.current() + same_term_timeout;
+
+            // Mirror the actor's timeout sequence: trigger_timeout records the
+            // reason (and must not disturb the finalization deadline), then the
+            // nullify vote is constructed.
+            state.trigger_timeout(view_1, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
                 .construct_nullify(view_1)
                 .expect("first timeout nullify should exist");
@@ -1633,6 +1640,63 @@ mod tests {
     }
 
     #[test]
+    fn finalization_timeout_survives_certificate_jump() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let finalization_timeout = Duration::from_secs(4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(7),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                term_length: TermLength::new(NZU64!(5)),
+                finalization_timeout,
+            };
+            let mut state = State::new(context.child("state"), cfg);
+            state.set_genesis(test_genesis());
+            assert_eq!(state.current_view(), View::new(1));
+
+            // Certify a notarization for view 7 (term [6,10]) while at view 1,
+            // jumping straight to view 8. The oldest unfinalized view in the
+            // new term (view 6) was never entered and has no deadline.
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(7), View::new(7)),
+                GENESIS_VIEW,
+                Sha256Digest::from([7u8; 32]),
+            );
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+                .collect();
+            let notarization = Notarization::from_notarizes(&verifier, votes.iter(), &Sequential)
+                .expect("notarization");
+            assert!(state.add_notarization(notarization).0);
+            let entered = context.current();
+            assert!(state.certified(View::new(7), true).is_some());
+            assert_eq!(state.current_view(), View::new(8));
+
+            // The finalization timeout must anchor on the oldest entered,
+            // unfinalized view in the term (view 8) rather than silently
+            // disabling itself because view 6 has no deadline.
+            assert_eq!(
+                state.next_finalization_timeout(),
+                Some((
+                    entered + finalization_timeout,
+                    TimeoutReason::FinalizationTimeout
+                )),
+                "jumped-over views must not disable the finalization timeout"
+            );
+        });
+    }
+
+    #[test]
     fn expire_old_round_is_noop() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -1649,7 +1713,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1705,7 +1768,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1781,7 +1843,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1844,7 +1905,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1901,7 +1961,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1961,7 +2020,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -2036,7 +2094,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -2477,7 +2534,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: TermLength::new(NZU64!(5)),
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2537,7 +2593,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2596,7 +2651,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2653,7 +2707,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2725,7 +2778,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2779,7 +2831,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2819,7 +2870,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2850,7 +2900,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -2979,7 +3028,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3157,7 +3205,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3230,7 +3277,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3311,7 +3357,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::new(NZU64!(5)),
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3373,7 +3418,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::new(NZU64!(5)),
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3441,7 +3485,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -3524,7 +3567,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3571,7 +3613,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(5)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3617,7 +3658,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3691,7 +3731,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3736,7 +3775,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(5)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3752,23 +3790,27 @@ mod tests {
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
-            // Now suppose view 1 finalizes and view 2 is certified in the same
-            // term. The earlier local nullify should still prevent a later
-            // finalize vote in the term.
+            // View 1 notarizes and certifies (without finalizing), advancing
+            // us to view 2 in the same term.
             let proposal_v1 = Proposal::new(
                 Rnd::new(Epoch::new(1), view),
                 GENESIS_VIEW,
                 Sha256Digest::from([42u8; 32]),
             );
-            let finalize_votes: Vec<_> = schemes
+            let notarize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Finalize::sign(scheme, proposal_v1.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, proposal_v1.clone()).unwrap())
                 .collect();
-            let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
-                    .expect("finalization");
-            state.add_finalization(finalization);
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(view, true).is_some());
+            assert_eq!(state.current_view(), View::new(2));
 
+            // View 2 is certified in the same term. Without an observed
+            // finalization at or above the nullified view, the earlier local
+            // nullify prevents a later finalize vote in the term.
             let view = View::new(2);
             let proposal_v2 = Proposal::new(
                 Rnd::new(Epoch::new(1), view),
@@ -3793,70 +3835,26 @@ mod tests {
                 state.construct_finalize(view).is_none(),
                 "should not finalize a later view after nullifying in same term"
             );
-        });
-    }
 
-    #[test]
-    fn term_stop_notarize_on_nullify_blocks_same_term_notarize() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
-                term_stop_notarize_on_nullify: true,
-                finalization_timeout: Duration::from_secs(4),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            let view = state.current_view();
-            let (was_retry, _) = state
-                .construct_nullify(view)
-                .expect("timeout nullify should exist");
-            assert!(!was_retry);
-
-            let proposal_v1 = Proposal::new(
-                Rnd::new(Epoch::new(1), view),
-                GENESIS_VIEW,
-                Sha256Digest::from([42u8; 32]),
-            );
-            let fin_votes: Vec<_> = schemes
+            // The finalization for view 1 arrives late (e.g., selectively
+            // withheld). Observing it unblocks the finalize vote for view 2.
+            let finalize_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, proposal_v1.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, fin_votes.iter(), &Sequential)
+                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization);
-            assert_eq!(state.current_view(), View::new(2));
-
-            let proposal_v2 = Proposal::new(
-                Rnd::new(Epoch::new(1), View::new(2)),
-                View::new(1),
-                Sha256Digest::from([43u8; 32]),
-            );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
-            assert!(state.try_verify().is_some());
-            assert!(state.verified(View::new(2)));
             assert!(
-                state.construct_notarize(View::new(2)).is_none(),
-                "same-term nullify should block later notarize when flag is enabled"
+                state.construct_finalize(view).is_some(),
+                "late-arriving finalization at the nullified view should unblock the finalize vote"
             );
         });
     }
 
     #[test]
-    fn term_stop_notarize_on_nullify_allows_same_term_notarize_when_disabled() {
+    fn same_term_nullify_does_not_block_notarize() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -3872,7 +3870,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(5)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3884,19 +3881,23 @@ mod tests {
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
+            // View 1 notarizes and certifies (no finalization is observed, so
+            // a hypothetical notarize gate would still be blocked), advancing
+            // us to view 2 in the same term.
             let proposal_v1 = Proposal::new(
                 Rnd::new(Epoch::new(1), view),
                 GENESIS_VIEW,
                 Sha256Digest::from([42u8; 32]),
             );
-            let fin_votes: Vec<_> = schemes
+            let notarize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Finalize::sign(scheme, proposal_v1.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, proposal_v1.clone()).unwrap())
                 .collect();
-            let finalization =
-                Finalization::from_finalizes(&verifier, fin_votes.iter(), &Sequential)
-                    .expect("finalization");
-            state.add_finalization(finalization);
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(view, true).is_some());
             assert_eq!(state.current_view(), View::new(2));
 
             let proposal_v2 = Proposal::new(
@@ -3910,7 +3911,7 @@ mod tests {
 
             assert!(
                 state.construct_notarize(View::new(2)).is_some(),
-                "same-term nullify should not block later notarize when flag is disabled"
+                "same-term nullify should not block later notarize votes"
             );
         });
     }
@@ -3932,7 +3933,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(5)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
 
@@ -3977,7 +3977,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::new(NZU64!(5)),
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3996,7 +3995,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_retains_local_nullify_for_current_term_safety() {
+    fn pruned_inert_nullify_does_not_block_finalize() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -4012,7 +4011,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(20)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -4071,9 +4069,14 @@ mod tests {
 
             let view = certify_view(&mut state);
 
+            // The finalization at view 10 covers the nullify at view 1, so the
+            // finalize vote is unblocked (and pruning the nullified round must
+            // not resurrect the block). Lock-relevant nullify votes are always
+            // above last_finalized and thus above min_active, so pruning can
+            // never remove an active lock.
             assert!(
-                state.construct_finalize(view).is_none(),
-                "pruned round must not prune same-term local nullify state"
+                state.construct_finalize(view).is_some(),
+                "inert same-term nullify must not block finalize after pruning"
             );
 
             let mut restarted = State::new(
@@ -4087,7 +4090,6 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: TermLength::new(NZU64!(20)),
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -4099,8 +4101,8 @@ mod tests {
 
             let view = certify_view(&mut restarted);
             assert!(
-                restarted.construct_finalize(view).is_none(),
-                "journal retention floor must preserve same-term local nullify after restart"
+                restarted.construct_finalize(view).is_some(),
+                "replayed inert nullify must remain inert after restart"
             );
         });
     }
@@ -4145,7 +4147,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -4217,7 +4218,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: TermLength::new(NZU64!(3)),
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
