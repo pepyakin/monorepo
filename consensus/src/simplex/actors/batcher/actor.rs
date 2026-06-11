@@ -300,7 +300,7 @@ where
                     current: new_current,
                     leader,
                     finalized: new_finalized,
-                    forwardable_proposal,
+                    certified_proposal,
                 } => {
                     let me = self.scheme.me();
                     let am_leader = me.is_some_and(|me| me == leader);
@@ -314,13 +314,10 @@ where
                     round.set_leader(leader);
                     let has_forwardable_proposal =
                         me.is_some_and(|me| round.has_forwardable_proposal(me));
-                    // The guards in Self::leader_nullified are unnecessary here:
-                    // current was just rebuilt (not timed out, leader set).
-                    let nullified_by_leader = round.has_nullify(leader);
 
                     // If the leader nullified this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
-                    let timeout_reason = match nullified_by_leader {
+                    let timeout_reason = match Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`)
                         true => Some(TimeoutReason::LeaderNullify),
@@ -338,7 +335,7 @@ where
                     }
 
                     // Forward the proposal, if enabled and we have something to forward
-                    if let Some((proposal, round)) = forwardable_proposal
+                    if let Some((proposal, round)) = certified_proposal
                         .filter(|_| self.forwarding.is_enabled())
                         .and_then(|proposal| {
                             work.get(&proposal.view()).map(|round| (proposal, round))

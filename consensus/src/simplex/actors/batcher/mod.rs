@@ -726,7 +726,7 @@ mod tests {
 
     /// Test that constructing a notarization does not forward immediately, but
     /// entering the next view with an explicit forwardable proposal does.
-    fn forward_emitted_on_view_advance_with_forwardable_proposal<S, F>(mut fixture: F)
+    fn forward_emitted_on_view_advance_with_certified_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -882,27 +882,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_forward_emitted_on_view_advance_with_forwardable_proposal() {
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+    fn test_forward_emitted_on_view_advance_with_certified_proposal() {
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_std::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_std::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(ed25519::fixture);
-        forward_emitted_on_view_advance_with_forwardable_proposal(secp256r1::fixture);
+        forward_emitted_on_view_advance_with_certified_proposal(ed25519::fixture);
+        forward_emitted_on_view_advance_with_certified_proposal(secp256r1::fixture);
     }
 
     /// Test that `SilentLeader` forwards only to the newly entered leader, and

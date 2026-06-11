@@ -1,5 +1,5 @@
 use crate::{
-    simplex::types::{Certificate, Notarization, Nullification},
+    simplex::types::{Certificate, Notarization},
     types::{TermLength, View},
     Viewable,
 };
@@ -19,7 +19,7 @@ pub struct State<S: Scheme, D: Digest> {
     /// Notarizations pending certification (possible floors).
     notarizations: BTreeMap<View, Notarization<S, D>>,
     /// Nullifications that cover any view greater than the floor.
-    nullifications: BTreeMap<View, Nullification<S>>,
+    nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
     /// Number of views in each leader term.
@@ -69,7 +69,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
                 if self.encounter_nullification(view) {
-                    self.nullifications.insert(view, nullification);
+                    self.nullifications
+                        .insert(view, Certificate::Nullification(nullification));
                     // The view and the rest of the term are considered nullified.
                     // Retain requests for views outside of this range.
                     //
@@ -156,24 +157,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Get the best certificate for a given view (or the floor
     /// if the view is below the floor).
-    pub fn get(&self, view: View) -> Option<Certificate<S, D>> {
+    pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
         // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
-                return Some(floor.clone());
+                return Some(floor);
             }
         }
 
         // Otherwise, return the nullification covering the view if it exists.
         self.covering_nullification(view)
-            .map(|n| Certificate::Nullification(n.clone()))
     }
 
     /// Returns the stored nullification covering `view`, if any.
     ///
     /// Since a nullification covers the rest of its term, it may be keyed at
     /// an earlier view in `view`'s term.
-    fn covering_nullification(&self, view: View) -> Option<&Nullification<S>> {
+    fn covering_nullification(&self, view: View) -> Option<&Certificate<S, D>> {
         let term_start = view.term_start(self.term_length);
         self.nullifications
             .range(term_start..=view)
@@ -423,7 +423,7 @@ mod tests {
         );
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
         assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
@@ -435,7 +435,7 @@ mod tests {
         );
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
@@ -447,7 +447,7 @@ mod tests {
         );
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == nullification_v1)
+            matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
         );
         assert_eq!(resolver.outstanding(), vec![3]);
     }
@@ -503,10 +503,10 @@ mod tests {
         );
 
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(
-            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(state.get(View::new(6)).is_none());
 
@@ -518,7 +518,7 @@ mod tests {
         );
         assert_eq!(state.nullifications.len(), 1);
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
 
         let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
@@ -561,10 +561,10 @@ mod tests {
 
         assert!(resolver.outstanding().is_empty());
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(
-            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
     }
 
@@ -619,10 +619,10 @@ mod tests {
             &mut resolver,
         );
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
 
         // New nullification is kept
@@ -633,10 +633,10 @@ mod tests {
             &mut resolver,
         );
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
 
         // Old nullification is ignored
@@ -647,16 +647,16 @@ mod tests {
             &mut resolver,
         );
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
         assert!(resolver.outstanding().is_empty());
     }

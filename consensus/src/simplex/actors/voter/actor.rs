@@ -1055,9 +1055,9 @@ impl<
 
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
-                    let forwardable_proposal = current_view
+                    let certified_proposal = current_view
                         .previous()
-                        .and_then(|view| self.state.forwardable_proposal(view));
+                        .and_then(|view| self.state.certified_proposal(view));
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
@@ -1065,7 +1065,7 @@ impl<
                         current_view,
                         leader,
                         self.state.last_finalized(),
-                        forwardable_proposal,
+                        certified_proposal,
                     );
                 }
             },
