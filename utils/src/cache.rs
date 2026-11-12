@@ -177,6 +177,19 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         Some(&slot.value)
     }
 
+    /// Returns the slot holding `key`, recording use.
+    ///
+    /// Slot indexes are below [Self::capacity], so callers can keep per-slot
+    /// data outside the cache (for example, a region of `capacity` buffers)
+    /// and use the slot returned here or by [Self::get_or_insert_mut] to find
+    /// the data for a key.
+    #[inline]
+    pub fn get_slot(&self, key: &K) -> Option<usize> {
+        let index = self.find_slot(key)?;
+        self.slots[index].state.record_hit();
+        Some(index)
+    }
+
     /// Returns a reference to the value in `slot` if that slot currently holds
     /// `key` as a live entry, recording use.
     ///
@@ -1494,6 +1507,13 @@ mod tests {
         let (hit_slot, value) = cache.get_or_insert_mut(1u64, || unreachable!());
         assert_eq!(slot, hit_slot);
         assert_eq!(*value, 10);
+        let (other, _) = cache.get_or_insert_mut(2u64, || 0u64);
+        assert_ne!(other, slot);
+        assert_eq!(cache.get_slot(&1), Some(slot));
+        assert_eq!(cache.get_slot(&2), Some(other));
+        assert_eq!(cache.get_slot(&3), None);
+        assert!(cache.remove(&1));
+        assert_eq!(cache.get_slot(&1), None);
         cache.check_invariants();
     }
 

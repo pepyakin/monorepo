@@ -26,7 +26,7 @@
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
 };
-use crate::{BLOB_PAGE_SIZE, Blob, Error, IoBuf, IoBufMut, ReadOptions};
+use crate::{BLOB_PAGE_SIZE, Blob, Error, IoBuf, ReadOptions};
 use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
     Widen, cache,
@@ -598,11 +598,20 @@ fn copy_page(page: &[u8], pieces: Pieces<'_, '_>) {
 /// eviction or invalidation, and their memory is fixed at construction, so no blob offset can grow
 /// them.
 struct Cache {
-    /// Maps each (blob id, page number) to its logical page buffer.
-    cache: cache::Cache<(u64, u64), IoBufMut>,
+    /// Maps each (blob id, page number) to the [cache::Cache] slot that holds it. The page bytes
+    /// of slot `i` are `pages[i * page_size..][..page_size]`.
+    cache: cache::Cache<(u64, u64), ()>,
 
-    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
-    /// out-of-range so untouched entries read as misses. The length is a power of two so
+    /// The bytes of every slot, in one allocation. It is zeroed but not written at construction,
+    /// so allocators that serve large zeroed allocations with fresh mappings (such as jemalloc
+    /// and mimalloc) make a page of it resident only when a slot that covers it is first filled.
+    /// No reference to slot bytes outlives the cache lock: hits copy out of the slot and inserts
+    /// copy into it.
+    pages: Box<[u8]>,
+
+    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized to
+    /// zero so the allocation stays lazily resident. An untouched entry names slot 0, which
+    /// resolves only if slot 0 holds that very page. The length is a power of two so
     /// [Self::hint_index] can wrap with a mask instead of a division, and at least twice the
     /// cache capacity: a full cache has one live page per `capacity`, so sizing at capacity
     /// makes hint collisions (and their slower fallback lookups) common.
@@ -649,12 +658,17 @@ impl CacheRef {
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes (see
     /// [Self::page_size] for how this relates to a page's physical size on disk).
-    /// Initialization eagerly allocates and zeroes all cache slots. Eviction follows
-    /// the cache's Clock2Q+ replacement algorithm.
+    /// Initialization allocates one zeroed region of `capacity * page_size` bytes for all
+    /// slots and does not write it, so most allocators leave the region non-resident until
+    /// pages are cached. Eviction follows the cache's Clock2Q+ replacement algorithm.
     ///
     /// Any `page_size` is accepted, but physical pages that do not align with blob pages (see the
     /// module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity * page_size` overflows `usize`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -736,9 +750,7 @@ impl CacheRef {
                 let page = match previous {
                     Some((previous_num, page)) if previous_num == page_num => page,
                     _ => {
-                        let page = page_cache
-                            .get_page(blob_id, page_num)
-                            .map(|page| page.as_ref());
+                        let page = page_cache.get_page(blob_id, page_num);
                         previous = Some((page_num, page));
                         page
                     }
@@ -865,7 +877,7 @@ impl CacheRef {
                 let page_num = pieces[0].0;
                 let key = (blob_id, page_num);
                 if let Some(page) = cache.get_page(blob_id, page_num) {
-                    copy_page(page.as_ref(), pieces);
+                    copy_page(page, pieces);
                 } else if let Some(entry) = cache.page_fetches.get_mut(&key) {
                     entry.waiters += 1;
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
@@ -1054,7 +1066,7 @@ impl CacheRef {
         cached
     }
 
-    /// Drop all cached pages while retaining the backing page buffers for reuse.
+    /// Drop all cached pages. Their slots are reused by later inserts.
     ///
     /// Call only when no reads are in flight for this cache.
     #[cfg(any(test, feature = "test-utils"))]
@@ -1068,12 +1080,15 @@ impl Cache {
     /// `page_size` bytes.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let slot_size: usize = page_size.widen();
-        let mut cache = cache::Cache::new(capacity);
-        cache.prefill(|| IoBufMut::zeroed(slot_size));
+        let pages = capacity
+            .get()
+            .checked_mul(slot_size)
+            .expect("page cache size overflows usize");
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
-            cache,
-            hints: vec![usize::MAX; hints],
+            cache: cache::Cache::new(capacity),
+            pages: vec![0; pages].into_boxed_slice(),
+            hints: vec![0; hints],
             page_size,
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
@@ -1107,7 +1122,6 @@ impl Cache {
         let Some(page) = self.get_page(blob_id, page_num) else {
             return 0;
         };
-        let page = page.as_ref();
 
         let bytes_to_copy = std::cmp::min(buf.len(), remaining);
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
@@ -1119,10 +1133,8 @@ impl Cache {
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
-        let (slot, buf) = self
-            .cache
-            .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
-        buf.as_mut().copy_from_slice(page);
+        let (slot, ()) = self.cache.get_or_insert_mut((blob_id, page_num), || ());
+        self.pages[slot * page_size..][..page_size].copy_from_slice(page);
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
     }
@@ -1143,16 +1155,18 @@ impl Cache {
 
     /// Look up a page, preferring its direct-mapped slot hint over the [cache::Cache]'s own lookup.
     #[inline]
-    fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
+    fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&[u8]> {
         let key = (blob_id, page_num);
-        let slot = self.hints[self.hint_index(blob_id, page_num)];
-        if let Some(page) = self.cache.get_at(slot, &key) {
-            return Some(page);
-        }
-        self.cache.get(&key)
+        let hint = self.hints[self.hint_index(blob_id, page_num)];
+        let slot = match self.cache.get_at(hint, &key) {
+            Some(()) => hint,
+            None => self.cache.get_slot(&key)?,
+        };
+        let page_size: usize = self.page_size.widen();
+        Some(&self.pages[slot * page_size..][..page_size])
     }
 
-    /// Drop all cached pages while retaining backing page buffers for reuse.
+    /// Drop all cached pages. Their slots are reused by later inserts.
     #[cfg(any(test, feature = "test-utils"))]
     fn clear(&mut self) {
         self.cache.retain(|_, _| false);
